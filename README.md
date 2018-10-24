@@ -35,6 +35,7 @@ Try it out now using the [Black Playground](https://black.now.sh).
 **[Code style](#the-black-code-style)** |
 **[pyproject.toml](#pyprojecttoml)** |
 **[Editor integration](#editor-integration)** |
+**[blackd](#blackd)** |
 **[Version control integration](#version-control-integration)** |
 **[Ignoring unmodified files](#ignoring-unmodified-files)** |
 **[Testimonials](#testimonials)** |
@@ -80,6 +81,8 @@ Options:
                               source on standard input).
   -S, --skip-string-normalization
                               Don't normalize string quotes or prefixes.
+  -N, --skip-numeric-underscore-normalization
+                              Don't normalize underscores in numeric literals.			      
   --check                     Don't write the files back, just return the
                               status.  Return code 0 means nothing would
                               change.  Return code 1 means some files would be
@@ -98,7 +101,7 @@ Options:
                               recursive searches. On Windows, use forward
                               slashes for directories.  [default:
                               build/|buck-out/|dist/|_build/|\.git/|\.hg/|
-                              \.mypy_cache/|\.tox/|\.venv/]
+                              \.mypy_cache/|\.nox/|\.tox/|\.venv/]
   -q, --quiet                 Don't emit non-error messages to stderr. Errors
                               are still emitted, silence those with
                               2>/dev/null.
@@ -140,7 +143,8 @@ original.  This slows it down.  If you're feeling confident, use
 
 *Black* reformats entire files in place.  It is not configurable.  It
 doesn't take previous formatting into account.  It doesn't reformat
-blocks that start with `# fmt: off` and end with `# fmt: on`.  It also
+blocks that start with `# fmt: off` and end with `# fmt: on`. `# fmt: on/off`
+have to be on the same level of indentation. It also
 recognizes [YAPF](https://github.com/google/yapf)'s block comments to
 the same effect, as a courtesy for straddling code.
 
@@ -276,7 +280,8 @@ ignore = E501
 ```
 
 You'll find *Black*'s own .flake8 config file is configured like this.
-If you're curious about the reasoning behind B950, Bugbear's documentation
+If you're curious about the reasoning behind B950, 
+[Bugbear's documentation](https://github.com/PyCQA/flake8-bugbear#opinionated-warnings)
 explains it.  The tl;dr is "it's like highway speed limits, we won't
 bother you if you overdo it by a few km/h".
 
@@ -373,11 +378,17 @@ an adoption helper, avoid using this for new projects.
 
 ### Numeric literals
 
-*Black* standardizes most numeric literals to use lowercase letters: `0xab`
+*Black* standardizes most numeric literals to use lowercase letters for the
+syntactic parts and uppercase letters for the digits themselves: `0xAB`
 instead of `0XAB` and `1e10` instead of `1E10`. Python 2 long literals are
 styled as `2L` instead of `2l` to avoid confusion between `l` and `1`. In
 Python 3.6+, *Black* adds underscores to long numeric literals to aid
 readability: `100000000` becomes `100_000_000`.
+
+For regions where numerals are grouped differently (like [India](https://en.wikipedia.org/wiki/Indian_numbering_system)
+and [China](https://en.wikipedia.org/wiki/Chinese_numerals#Whole_numbers)),
+the `-N` or `--skip-numeric-underscore-normalization` command line option
+makes *Black* preserve underscores in numeric literals.
 
 ### Line breaks & binary operators
 
@@ -536,6 +547,8 @@ other file.
 
 If you're running with `--verbose`, you will see a blue message if
 a file was found and used.
+
+Please note `blackd` will not use `pyproject.toml` configuration. 
 
 
 ### Configuration format
@@ -745,6 +758,78 @@ affect your use case.
 
 This can be used for example with PyCharm's [File Watchers](https://www.jetbrains.com/help/pycharm/file-watchers.html).
 
+## blackd
+
+`blackd` is a small HTTP server that exposes *Black*'s functionality over
+a simple protocol. The main benefit of using it is to avoid paying the
+cost of starting up a new *Black* process every time you want to blacken
+a file.
+
+### Usage
+
+`blackd` is not packaged alongside *Black* by default because it has additional
+dependencies. You will need to do `pip install black[d]` to install it.
+
+You can start the server on the default port, binding only to the local interface
+by running `blackd`. You will see a single line mentioning the server's version,
+and the host and port it's listening on. `blackd` will then print an access log
+similar to most web servers on standard output, merged with any exception traces
+caused by invalid formatting requests.
+
+`blackd` provides even less options than *Black*. You can see them by running
+`blackd --help`:
+
+```text
+Usage: blackd [OPTIONS]
+
+Options:
+  --bind-host TEXT                Address to bind the server to.
+  --bind-port INTEGER             Port to listen on
+  --version                       Show the version and exit.
+  -h, --help                      Show this message and exit.
+```
+
+### Protocol
+
+`blackd` only accepts `POST` requests at the `/` path. The body of the request
+should contain the python source code to be formatted, encoded 
+according to the `charset` field in the `Content-Type` request header. If no
+`charset` is specified, `blackd` assumes `UTF-8`.
+
+There are a few HTTP headers that control how the source is formatted. These
+correspond to command line flags for *Black*. There is one exception to this:
+`X-Protocol-Version` which if present, should have the value `1`, otherwise the
+request is rejected with `HTTP 501` (Not Implemented). 
+
+The headers controlling how code is formatted are:
+
+ - `X-Line-Length`: corresponds to the `--line-length` command line flag.
+ - `X-Skip-String-Normalization`: corresponds to the `--skip-string-normalization`
+    command line flag. If present and its value is not the empty string, no string
+    normalization will be performed.
+ - `X-Skip-Numeric-Underscore-Normalization`: corresponds to the
+    `--skip-numeric-underscore-normalization` command line flag.
+ - `X-Fast-Or-Safe`: if set to `fast`, `blackd` will act as *Black* does when
+    passed the `--fast` command line flag.
+ - `X-Python-Variant`: if set to `pyi`, `blackd` will act as *Black* does when
+    passed the `--pyi` command line flag. Otherwise, its value must correspond to
+    a Python version. If this value represents at least Python 3.6, `blackd` will
+    act as *Black* does when passed the `--py36` command line flag.
+
+If any of these headers are set to invalid values, `blackd` returns a `HTTP 400`
+error response, mentioning the name of the problematic header in the message body.
+
+Apart from the above, `blackd` can produce the following response codes:
+
+ - `HTTP 204`: If the input is already well-formatted. The response body is
+	empty.
+ - `HTTP 200`: If formatting was needed on the input. The response body
+	contains the blackened Python code, and the `Content-Type` header is set
+	accordingly.
+ - `HTTP 400`: If the input contains a syntax error. Details of the error are
+	returned in the response body.
+ - `HTTP 500`: If there was any kind of error while trying to format the input.
+	The response body contains a textual representation of the error.
 
 ## Version control integration
 
@@ -848,31 +933,48 @@ More details can be found in [CONTRIBUTING](CONTRIBUTING.md).
 
 ## Change Log
 
-### 18.8b0
-
-* adjacent string literals are now correctly split into multiple lines (#463)
+### 18.9b0
 
 * numeric literals are now formatted by *Black* (#452, #461, #464, #469):
 
   * numeric literals are normalized to include `_` separators on Python 3.6+ code
 
+  * added `--skip-numeric-underscore-normalization` to disable the above behavior and
+    leave numeric underscores as they were in the input
+
   * code with `_` in numeric literals is recognized as Python 3.6+
 
-  * most letters in numeric literals are lowercased (e.g., in `1e10` or `0xab`)
+  * most letters in numeric literals are lowercased (e.g., in `1e10`, `0x01`)
+
+  * hexadecimal digits are always uppercased (e.g. `0xBADC0DE`)
+
+* added `blackd`, see [its documentation](#blackd) for more info (#349)
+
+* adjacent string literals are now correctly split into multiple lines (#463)
+
+* trailing comma is now added to single imports that don't fit on a line (#250)
 
 * cache is now populated when `--check` is successful for a file which speeds up
   consecutive checks of properly formatted unmodified files (#448)
+
+* whitespace at the beginning of the file is now removed (#399)
+
+* fixed mangling [pweave](http://mpastell.com/pweave/) and
+  [Spyder IDE](https://pythonhosted.org/spyder/) special comments (#532)
+
+* fixed unstable formatting when unpacking big tuples (#267)
 
 * fixed parsing of `__future__` imports with renames (#389)
 
 * fixed scope of `# fmt: off` when directly preceding `yield` and other nodes (#385)
 
-* note: the Vim plugin stopped registering ``,=`` as a default chord as it turned out
-  to be a bad idea (#415)
-
 * fixed formatting of lambda expressions with default arguments (#468)
 
-* *Black* no longer breaks ``async for`` statements up to separate lines (#372)
+* fixed ``async for`` statements: *Black* no longer breaks them into separate
+  lines (#372)
+
+* note: the Vim plugin stopped registering ``,=`` as a default chord as it turned out
+  to be a bad idea (#415)
 
 
 ### 18.6b4
